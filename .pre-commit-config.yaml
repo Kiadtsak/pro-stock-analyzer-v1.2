@@ -1,0 +1,53 @@
+# .pre-commit-config.yaml — Runs automatically before every `git commit`
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Then every `git commit` will run these checks.
+# To run manually: pre-commit run --all-files
+# To skip once:    git commit --no-verify
+
+repos:
+  # ── General file cleanups ─────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+      - id: detect-private-key   # Catch leaked API keys/secrets
+
+  # ── Ruff — lint + format (fast, replaces flake8/isort) ────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # ── Mypy — static type checking ───────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - pydantic
+          - fastapi
+        args: [--config-file=pyproject.toml]
+        exclude: ^tests/
+
+  # ── Custom local: run pytest before commit ────────────
+  - repo: local
+    hooks:
+      - id: pytest-check
+        name: pytest (unit tests only)
+        entry: pytest tests/ -m unit -x --tb=short -q
+        language: system
+        pass_filenames: false
+        stages: [commit]

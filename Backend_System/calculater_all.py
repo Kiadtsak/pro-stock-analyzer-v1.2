@@ -1,0 +1,113 @@
+from Backend_System.Settings import YEAR
+#from processing import profitability, liquidity, efficiency, valuation
+from Backend_System.CashFlowModel import CashFlowModel
+
+def calculate_ratios_by_year(income_data, balance_data, cashflow_data, basic_info, year=YEAR):
+    results = {}
+    for year in sorted(set(income_data) & set(balance_data) & set(cashflow_data)):
+    #for year in income_data.keys():
+       # Ensure year is a string to match keys in data
+        try:
+            income = income_data[year] or {}
+            balance = balance_data[year] or {}
+            cashflow = cashflow_data[year] or {}
+            price = basic_info or {}
+            
+            if not (income and balance and cashflow):
+                print(f" ข้อมูลไม่ครบสำหรับปี {year}(Price: {bool(price)}) (income: {bool(income)}, (balance: {bool(balance)}, (cashflow: {bool(cashflow)})")
+                continue
+
+            # สร้าง OOP instance ของ CashFlowModel   
+            model = CashFlowModel(income, balance, cashflow)
+
+            results[year] = {
+               # "Gross Profit Margin": profitability.gross_profit_margin(income),
+                # "Operating Profit Margin": profitability.operation_profit_margin(income),
+               # "Net Profit Margin": profitability.net_profit_margin(income),
+               # "RoA": profitability.roa(income, balance),
+               # "ROE": profitability.roe(income, balance),
+               # "EBITDA Margin": profitability.ebitda_margin(income),
+                
+                # Profitability Ratios
+                "ROE": model.ROE(),
+                "RoA": model.ROA(),
+                "EBITDA Margin": model.ebitda_margin(),
+                "Net Profit Margin": model.net_profit_margin(),
+                "Gross Profit MArgin": model.gross_profit_margin(),
+                "Operating Profit Margin": model.operation_profit_margin(),
+                             
+
+                # Cash Flow Ratios
+                #"Cost of Equity": model.cost_of_eqiuty(),
+                
+                "WACC": model.wacc(),
+                "Cost of Equity": model.cost_of_equity(),
+                "Unlevered Free Cash Flow (UFCF)": model.unlevered_free_cash_flow(),
+                "Operating Cash Flow (OCF)": model.Operating_Cash_Flow(),
+                "Free Cash Flow (FCF)": model.Free_Cash_Flow(),
+                #"Intrinsic Value Per Share": model.intrinsic_value_per_share(), ##
+                #"DCF Valuetion": model.dcf_model_multiyear(),
+                #"Operating Cash Flow (OCF) ": cash_flow.Operating_Cash_Flow(income, cashflow, year),
+                #"Investing Cash Flow (ICF)": cash_flow.Investing_Cash_Flow(cashflow, year),
+                #"Financing Cash Flow (FCF)": cash_flow.Financing_Cash_Flow(cashflow, year),
+                #"Net Cash FLow (NCC)": cash_flow.Net_Cash_Flow(income, cashflow),
+                #"Free Cash Flow (FCF)": cash_flow.Free_Cash_Flow(income, cashflow, year),
+                #"Growth Rate CAGR": model.growth_rate_cagr(),
+                #"Unlevered Free Cash Flow (UFCF)": cash_flow.Unlevered_Free_Cash_Flow(income, cashflow, year),
+                #"Growth Rate": cash_flow.Growth_Rate_EPS(income, year),
+                #"Terminal Value": cash_flow.Terminal_Value(income, cashflow, year),
+                
+                #"WACC": cash_flow.WACC(balance, balance,  cashflow, year),
+                #"GRowth_rate": cash_flow.Growth_Rate(income, cashflow),
+                #"DCF Valuation": cash_flow.DCF_Model(income, balance, cashflow, year),
+                #"Intrinsic Value": cash_flow.Intrinsic_Value_Per_Share(income, cashflow, year),
+
+
+                # Liquidity Ratios
+                "Current Ratio": model.current_ratio(),
+                #python"Quick Ratio": model.quick_ratio(),
+                "Cash Ratio": model.cash_ratio(),
+                #"Current Ratio": liquidity.current_ratio(balance),
+                #"Quick Ratio": liquidity.quick_ratio(balance),
+                #"Cash Ratio": liquidity.cash_ratio(balance),
+               
+                # Efficiency Ratios
+                "Asset Turnover": model.asset_turnover(),
+                #"Inventory Turnover": model.inventory_turnover(),
+                #"Receivables Turnover": model.receivables_turnover(),
+                #"Days Inventory Outstanding (DIO)": model.days_inventory_outstanding(),
+                #"Days Sales Outstanding (DSO)": model.days_sales_outstanding(),
+                #"working Capital Turnover": model.working_capital_turnover(),
+                #"Asset Turnover": efficiency.asset_turnover(income, balance), 
+                #"Inventory Turnover": efficiency.inventory_turnover(income, balance),
+                #"Receivables Turnover": efficiency.receivables_turnover(income, balance),
+                #"Days Inventory Oustanding (DIO)": efficiency.days_inventory(income, balance),
+                #"Days Sales Outstanding (DSO)": efficiency.days_sales_outstanding(income, balance),
+                #"Working Capital Turnover": efficiency.working_capital_turnover(income, balance),
+                
+
+                #"Free Cash Flow": cashflow["Free Cash Flow"],
+
+                # Valuation Ratios
+                "EPS": model.EPS_Ratio(),
+                "PE Ratio": model.PE_Ratio(),
+                "Owner's Earnings": model.Owners_Earnings(),
+                "PBV Ratio": model.PBV_Ratio(),
+                #"EPS_Ratio": valuation.eps_ratio(income),
+                #"Owner Earnings": valuation.owner_earnings(income, cashflow),
+               # "EPS": valuation.eps_ratio(income),
+                #"Compound Aunual Growth Rate (CAGR) (อัตราการเติบโต)": valuation.Compound_Annual_Growth_Rate(cashflow)
+               # "PE Ratio": valuation.PE_ratios(income),
+                #"PB Ratio": valuation.pb_ratio(balance)
+            
+            
+            }
+            
+        except Exception as e:
+            print(f" Error Processing year {year}: {e}")
+            continue
+
+    if not results:
+        return None
+    
+    return results

@@ -1,0 +1,37 @@
+.PHONY: help setup run test clean import-data
+
+help:
+	@echo "═══════════════════════════════════════════════════════════════"
+	@echo "  Pro Stock Analyzer"
+	@echo "═══════════════════════════════════════════════════════════════"
+	@echo "  make setup        Install dependencies in venv"
+	@echo "  make run          Start dashboard on http://localhost:8300"
+	@echo "  make test         Run smoke tests"
+	@echo "  make import-data  Copy data from System_Stock/data/ if exists"
+	@echo "  make clean        Remove caches"
+
+setup:
+	@echo "🔧 Creating virtual environment..."
+	python3 -m venv .venv
+	@echo "📦 Installing dependencies..."
+	. .venv/bin/activate && pip install --upgrade pip -q && pip install -r requirements.txt
+
+run:
+	@bash run.sh
+
+test:
+	@echo "🧪 Running smoke tests..."
+	@PYTHONPATH=$$(pwd) python3 tests/smoke_test.py
+
+import-data:
+	@if [ -d "../System_Stock/data" ]; then \
+		echo "📥 Copying data from ../System_Stock/data/ ..."; \
+		cp ../System_Stock/data/*.json data/ 2>/dev/null || true; \
+		ls data/*.json 2>/dev/null | wc -l | xargs echo "   Files imported:"; \
+	else \
+		echo "❌ ../System_Stock/data/ not found"; \
+	fi
+
+clean:
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type d -name .pytest_cache -exec rm -rf {} +

@@ -1,0 +1,786 @@
+# Blackend/CashFlowModel.py  (PATCHED VERSION)
+"""
+แก้บั๊กหลัก:
+1. FCF: CapEx ในข้อมูลเป็นค่าลบอยู่แล้ว -> ต้อง OCF + CapEx (ไม่ใช่ -)
+2. WACC: fallback เมื่อ interest_paid=0, ใช้ 10-Y Treasury spread เป็น proxy
+3. Cost of Equity: รับ market_return ที่สมเหตุสมผลกว่า + รองรับ override
+4. PE Ratio: กันหารด้วย 0 / EPS ลบ
+5. เพิ่ม safety guard ทุก division
+6. quick_ratio, PBV_Ratio: ตรวจ key names ให้ตรงกับข้อมูลจริง
+7. dcf_model_multiyear: รองรับข้อมูลไม่ครบโดย interpolate/fallback
+"""
+from __future__ import annotations
+import numpy as np
+from Blackend.Settings import TAX_RATE, RISK_FREE_RATE, BETA
+from typing import Dict, Optional, List
+
+
+class CashFlowModel:
+    def __init__(
+        self,
+        income_data: Optional[Dict] = None,
+        balance_data: Optional[Dict] = None,
+        cashflow_data: Optional[Dict] = None,
+    ):
+        self.income = income_data or {}
+        self.balance = balance_data or {}
+        self.cashflow = cashflow_data or {}
+
+    # ---------------- Safe helpers ---------------- #
+
+    def _num(self, d: Dict, key: str, default: float = 0.0) -> float:
+        """ดึงค่าตัวเลขแบบปลอดภัย รองรับคีย์ที่ขาดหายหรือเป็น None"""
+        v = d.get(key, default)
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_div(self, num: float, den: float, default: float = 0.0) -> float:
+        """หารแบบกัน zero/None"""
+        try:
+            if den == 0 or den is None:
+                return default
+            return num / den
+        except (TypeError, ZeroDivisionError):
+            return default
+
+    # ================= Cost of Capital ================= #
+
+    def cost_of_equity(self, market_return: Optional[List[float]] = None) -> float:
+        """
+        CAPM: Ke = Rf + β × (Rm - Rf)
+        ใช้ค่าเฉลี่ย S&P 500 return ~10% เป็น default (ไม่ใช่ [7,8,9,10]%)
+        """
+        if market_return is None:
+            rm = 0.10  # S&P 500 long-term avg ~10%
+        else:
+            rm = float(np.mean(market_return))
+        return RISK_FREE_RATE + BETA * (rm - RISK_FREE_RATE)
+
+    def interest_paid(self) -> float:
+        """
+        Interest Paid จากงบกระแสเงินสด (มักเป็นค่าลบ = cash out)
+        คืนเป็นค่าบวก (จำนวนที่จ่ายจริง)
+        Fallback: Interest Expense จาก Income Statement
+        """
+        # ใช้ Interest Paid ตรงๆ ก่อน
+        ip = self._num(self.cashflow, "Interest Paid", 0.0)
+        if ip != 0:
+            return abs(ip)
+
+        # Fallback จาก Income Statement
+        ie = self._num(self.income, "Interest Expense", 0.0)
+        return abs(ie)
+
+    def wacc(self) -> float:
+        """
+        WACC = (E/V) × Ke + (D/V) × Kd × (1-T)
+        - ถ้าไม่มีข้อมูลดอกเบี้ย ใช้ Kd proxy = Risk Free + 2% credit spread
+        - ถ้า Equity หรือ Debt ขาดข้อมูล ใช้ค่า default ที่สมเหตุสมผล
+        """
+        equity = self._num(self.balance, "Total Shareholder Equity", 0.0)
+        if equity <= 0:
+            equity = self._num(self.balance, "Total Equity", 0.0)
+        debt = self._num(self.balance, "Total Debt", 0.0)
+
+        # ถ้าทั้งสองไม่มี -> return default
+        if equity <= 0 and debt <= 0:
+            return 0.10
+
+        # Cost of Debt
+        interest = self.interest_paid()
+        if debt > 0 and interest > 0:
+            cost_debt = interest / debt
+        else:
+            # Fallback: Rf + credit spread (corporate BBB avg ~2%)
+            cost_debt = RISK_FREE_RATE + 0.02
+
+        # กัน cost of debt ที่ผิดปกติ
+        cost_debt = min(max(cost_debt, 0.01), 0.15)
+        cost_debt_after_tax = cost_debt * (1 - TAX_RATE)
+
+        total = equity + debt
+        ke = self.cost_of_equity()
+        wacc = (equity / total) * ke + (debt / total) * cost_debt_after_tax
+        return round(wacc, 4)
+
+    # ================= Cash Flow ================= #
+
+    def Operating_Cash_Flow(self) -> float:
+        """
+        OCF จากงบ CF โดยตรง (ถ้ามี) แทนการสร้างใหม่
+        ถ้าไม่มี: NI + D&A + SBC + Other Non-Cash + ΔWC
+        """
+        ocf_direct = self._num(self.cashflow, "Operating Cash Flow", 0.0)
+        if ocf_direct != 0:
+            return ocf_direct
+
+        # Fallback: คำนวณเอง
+        ni = self._num(self.income, "Net Income", 0.0)
+        da = self._num(self.income, "Depreciation and Amortization", 0.0)
+        sbc = self._num(self.cashflow, "Stock Based Compensation", 0.0)
+        onc = self._num(self.cashflow, "Other Non Cash Items", 0.0)
+        wc = self._num(self.cashflow, "Change in Working Capital", 0.0)
+        return ni + da + sbc + onc + wc
+
+    def Free_Cash_Flow(self) -> float:
+        """
+        🔴 BUG FIX: CapEx จาก FMP/FinanceToolkit เป็นค่าลบอยู่แล้ว
+        FCF = OCF + CapEx (ไม่ใช่ - CapEx)
+        
+        ถ้ามี Free Cash Flow ในงบ CF อยู่แล้ว -> ใช้ตรงๆ
+        """
+        fcf_direct = self._num(self.cashflow, "Free Cash Flow", 0.0)
+        if fcf_direct != 0:
+            return fcf_direct
+
+        ocf = self.Operating_Cash_Flow()
+        capex = self._num(self.cashflow, "Capital Expenditure", 0.0)
+        # CapEx เป็นค่าลบอยู่แล้ว -> บวกตรงๆ
+        return ocf + capex
+
+    def unlevered_free_cash_flow(self) -> float:
+        """
+        UFCF = EBIT×(1-T) + D&A - CapEx - ΔWC
+        CapEx เป็นลบ -> บวกตรงๆ, ΔWC (เพิ่ม = cash out)
+        """
+        op_inc = self._num(self.income, "Operating Income", 0.0)
+        da = self._num(self.income, "Depreciation and Amortization", 0.0)
+        capex = self._num(self.cashflow, "Capital Expenditure", 0.0)
+        wc = self._num(self.cashflow, "Change in Working Capital", 0.0)
+        # capex เป็นลบอยู่แล้ว -> บวกเข้า / wc ในงบ CF เป็น source(+) ใช้จริง(-)
+        return op_inc * (1 - TAX_RATE) + da + capex - wc
+
+    # ================= Growth ================= #
+
+    def growth_rate_cagr(self, start: float, end: float, years: int) -> float:
+        """CAGR แบบกัน negative base และ zero division"""
+        if start is None or end is None or start <= 0 or end <= 0 or years <= 0:
+            return 0.0
+        try:
+            return float(np.power(end / start, 1 / years) - 1)
+        except Exception:
+            return 0.0
+
+    # ================= DCF (Vectorized) ================= #
+
+    def dcf_model_multiyear(self, ufcf_series: List[float], years: int = 10) -> np.ndarray:
+        """
+        DCF แบบ vectorized
+        - ถ้า UFCF ไม่ครบ N ปี -> ใช้ที่มี + extrapolate ด้วย CAGR
+        - ป้องกัน wacc <= g (terminal value ระเบิด)
+        """
+        ufcf = np.array([float(x) for x in ufcf_series if x is not None], dtype=float)
+        if len(ufcf) == 0:
+            raise ValueError("UFCF series ว่าง")
+
+        wacc = self.wacc()
+        if wacc <= 0:
+            wacc = 0.10
+
+        # ถ้าไม่ครบ -> extrapolate
+        if len(ufcf) < years:
+            # CAGR จากสิ่งที่มี
+            if len(ufcf) >= 2:
+                g = self.growth_rate_cagr(ufcf[0], ufcf[-1], len(ufcf) - 1)
+            else:
+                g = 0.05
+            last = ufcf[-1]
+            extra = []
+            for _ in range(years - len(ufcf)):
+                last = last * (1 + g)
+                extra.append(last)
+            ufcf = np.concatenate([ufcf, np.array(extra)])
+
+        ufcf = ufcf[:years]
+
+        t = np.arange(1, years + 1)
+        discount_factor = np.power(1 + wacc, t)
+        discounted = ufcf / discount_factor
+
+        # Terminal Value (กัน g >= wacc)
+        g = self.growth_rate_cagr(ufcf[0], ufcf[-1], years)
+        g = min(max(g, -0.05), wacc - 0.01)  # clip
+        terminal = (ufcf[-1] * (1 + g)) / (wacc - g)
+        terminal_discounted = terminal / np.power(1 + wacc, years)
+
+        return np.append(discounted, terminal_discounted)
+
+    def intrinsic_value_per_share(self, ufcf_series: List[float]) -> float:
+        dcf = self.dcf_model_multiyear(ufcf_series)
+        # 🔴 BUG FIX: ชื่อคีย์มี space เกิน "weighted_average_shares " -> ใช้ชื่อจริง
+        shares = self._num(self.income, "Weighted Average Shares", 0.0)
+        if shares <= 0:
+            shares = self._num(self.income, "Weighted Average Shares Diluted", 1.0)
+        return round(self._safe_div(float(dcf.sum()), shares, 0.0), 2)
+
+    # ================= Efficiency ================= #
+
+    def asset_turnover(self) -> float:
+        rev = self._num(self.income, "Revenue")
+        ta = self._num(self.balance, "Total Assets")
+        return self._safe_div(rev, ta)
+
+    def inventory_turnover(self) -> float:
+        cogs = self._num(self.income, "Cost of Goods Sold")
+        inv = self._num(self.balance, "Inventory")
+        return self._safe_div(cogs, inv)
+
+    def receivables_turnover(self) -> float:
+        rev = self._num(self.income, "Revenue")
+        ar = self._num(self.balance, "Accounts Receivable")
+        return self._safe_div(rev, ar)
+
+    def days_inventory_outstanding(self) -> float:
+        it = self.inventory_turnover()
+        return self._safe_div(365.0, it)
+
+    def days_sales_outstanding(self) -> float:
+        rt = self.receivables_turnover()
+        return self._safe_div(365.0, rt)
+
+    def working_capital_turnover(self) -> float:
+        ca = self._num(self.balance, "Total Current Assets")
+        cl = self._num(self.balance, "Total Current Liabilities")
+        rev = self._num(self.income, "Revenue")
+        wc = ca - cl
+        return self._safe_div(rev, wc)
+
+    # ================= Profitability ================= #
+
+    def ROE(self) -> float:
+        ni = self._num(self.income, "Net Income")
+        eq = self._num(self.balance, "Total Shareholder Equity")
+        if eq <= 0:
+            eq = self._num(self.balance, "Total Equity")
+        return self._safe_div(ni, eq) * 100
+
+    def ROA(self) -> float:
+        ni = self._num(self.income, "Net Income")
+        ta = self._num(self.balance, "Total Assets")
+        return self._safe_div(ni, ta) * 100
+
+    def gross_profit_margin(self) -> float:
+        gp = self._num(self.income, "Gross Profit")
+        rev = self._num(self.income, "Revenue")
+        return self._safe_div(gp, rev) * 100
+
+    def operation_profit_margin(self) -> float:
+        op = self._num(self.income, "Operating Income")
+        rev = self._num(self.income, "Revenue")
+        return self._safe_div(op, rev) * 100
+
+    def net_profit_margin(self) -> float:
+        ni = self._num(self.income, "Net Income")
+        rev = self._num(self.income, "Revenue")
+        return self._safe_div(ni, rev) * 100
+
+    def ebitda_margin(self) -> float:
+        ebitda = self._num(self.income, "EBITDA")
+        rev = self._num(self.income, "Revenue")
+        return self._safe_div(ebitda, rev) * 100
+
+    # ================= Valuation ================= #
+
+    def Owners_Earnings(self) -> float:
+        """
+        Buffett's Owner Earnings = NI + D&A + CapEx - ΔWC (approx)
+        Note: CapEx เป็นลบ -> บวกตรงๆ
+        """
+        ni = self._num(self.income, "Net Income")
+        da = self._num(self.cashflow, "Depreciation and Amortization")
+        capex = self._num(self.cashflow, "Capital Expenditure")
+        wc = self._num(self.cashflow, "Change in Working Capital")
+        return ni + da + capex - wc
+
+    def EPS_Ratio(self) -> float:
+        """ใช้ EPS จากข้อมูลจริงก่อน ถ้าไม่มี -> คำนวณเอง"""
+        eps = self._num(self.income, "EPS")
+        if eps != 0:
+            return eps
+        ni = self._num(self.income, "Net Income")
+        shares = self._num(self.income, "Weighted Average Shares")
+        return self._safe_div(ni, shares)
+
+    def PE_Ratio(self) -> float:
+        """P/E = Price / EPS (กัน EPS <= 0)"""
+        price = self._num(self.income, "price")
+        eps = self.EPS_Ratio()
+        if eps <= 0:
+            return 0.0
+        return self._safe_div(price, eps)
+
+    def PBV_Ratio(self) -> float:
+        """P/B = Price / (Equity per share)"""
+        equity = self._num(self.balance, "Total Shareholder Equity")
+        if equity <= 0:
+            equity = self._num(self.balance, "Total Equity")
+        shares = self._num(self.income, "Weighted Average Shares")
+        price = self._num(self.income, "price")
+
+        if equity <= 0 or shares <= 0 or price <= 0:
+            return 0.0
+
+        book_value = equity / shares
+        return self._safe_div(price, book_value)
+
+    # ================= Liquidity ================= #
+
+    def current_ratio(self) -> float:
+        ca = self._num(self.balance, "Total Current Assets")
+        cl = self._num(self.balance, "Total Current Liabilities")
+        return self._safe_div(ca, cl)
+
+    def quick_ratio(self) -> float:
+        ca = self._num(self.balance, "Total Current Assets")
+        inv = self._num(self.balance, "Inventory")
+        cl = self._num(self.balance, "Total Current Liabilities")
+        return self._safe_div(ca - inv, cl)
+
+    def cash_ratio(self) -> float:
+        cash = self._num(self.balance, "Cash and Cash Equivalents")
+        sti = self._num(self.balance, "Short Term Investments")
+        cl = self._num(self.balance, "Total Current Liabilities")
+        return self._safe_div(cash + sti, cl)
+
+    # ================= NEW: Solvency ================= #
+
+    def debt_to_equity(self) -> float:
+        debt = self._num(self.balance, "Total Debt")
+        eq = self._num(self.balance, "Total Shareholder Equity")
+        if eq <= 0:
+            eq = self._num(self.balance, "Total Equity")
+        return self._safe_div(debt, eq)
+
+    def debt_to_assets(self) -> float:
+        debt = self._num(self.balance, "Total Debt")
+        ta = self._num(self.balance, "Total Assets")
+        return self._safe_div(debt, ta)
+
+    def interest_coverage(self) -> float:
+        ebit = self._num(self.income, "EBIT")
+        ie = self._num(self.income, "Interest Expense")
+        return self._safe_div(ebit, ie)
+
+    # ================= NEW: Risk / Altman Z-Score ================= #
+
+    def altman_z_score(self) -> float:
+        """
+        Altman Z = 1.2A + 1.4B + 3.3C + 0.6D + 1.0E
+        A = Working Capital / Total Assets
+        B = Retained Earnings / Total Assets
+        C = EBIT / Total Assets
+        D = Equity / Total Liabilities  (market value ideal)
+        E = Revenue / Total Assets
+        """
+        ta = self._num(self.balance, "Total Assets")
+        if ta <= 0:
+            return 0.0
+
+        ca = self._num(self.balance, "Total Current Assets")
+        cl = self._num(self.balance, "Total Current Liabilities")
+        re = self._num(self.balance, "Retained Earnings")
+        ebit = self._num(self.income, "EBIT")
+        eq = self._num(self.balance, "Total Shareholder Equity")
+        if eq <= 0:
+            eq = self._num(self.balance, "Total Equity")
+        tl = self._num(self.balance, "Total Liabilities")
+        rev = self._num(self.income, "Revenue")
+
+        A = self._safe_div(ca - cl, ta)
+        B = self._safe_div(re, ta)
+        C = self._safe_div(ebit, ta)
+        D = self._safe_div(eq, tl)
+        E = self._safe_div(rev, ta)
+
+        return 1.2 * A + 1.4 * B + 3.3 * C + 0.6 * D + 1.0 * E
+
+
+ เพิ่ไหม่
+ 
+
+
+        # CashFlowModel.py — Additional Functions Patch
+
+เพิ่มเฉพาะฟังก์ชันใหม่ โดยไม่เปลี่ยนโครงสร้างเดิมของ `CashFlowModel.py`
+
+นำ methods ด้านล่างไปวางต่อท้าย class `CashFlowModel`
+
+```python
+    # ================= Enterprise Value ================= #
+
+    def enterprise_value(self) -> float:
+        market_cap = self._get(self.income, MCAP_KEYS, default=0.0)
+        debt = self._num(self.balance, "Total Debt", 0.0)
+        cash = self._num(self.balance, "Cash and Cash Equivalents", 0.0)
+        return market_cap + debt - cash
+
+    def ev_ebitda(self) -> float:
+        ev = self.enterprise_value()
+        ebitda = self._num(self.income, "EBITDA", 0.0)
+        return self._safe_div(ev, ebitda)
+
+    def ev_sales(self) -> float:
+        ev = self.enterprise_value()
+        revenue = self._num(self.income, "Revenue", 0.0)
+        return self._safe_div(ev, revenue)
+
+    def ev_fcf(self) -> float:
+        ev = self.enterprise_value()
+        fcf = self.Free_Cash_Flow()
+        return self._safe_div(ev, fcf)
+
+    # ================= FCFF / FCFE ================= #
+
+    def fcff(self) -> float:
+        ebit = self._num(self.income, "EBIT", 0.0)
+        tax = TAX_RATE
+        da = self._num(self.cashflow, "Depreciation and Amortization", 0.0)
+        capex = self._num(self.cashflow, "Capital Expenditure", 0.0)
+        wc = self._num(self.cashflow, "Change in Working Capital", 0.0)
+        return (ebit * (1 - tax)) + da + capex - wc
+
+    def fcfe(self) -> float:
+        ni = self._num(self.income, "Net Income", 0.0)
+        da = self._num(self.cashflow, "Depreciation and Amortization", 0.0)
+        capex = self._num(self.cashflow, "Capital Expenditure", 0.0)
+        wc = self._num(self.cashflow, "Change in Working Capital", 0.0)
+        net_borrowing = self._num(self.cashflow, "Net Borrowings", 0.0)
+        return ni + da + capex - wc + net_borrowing
+
+    # ================= ROIC / ROCE ================= #
+
+    def ROIC(self) -> float:
+        nopat = self._num(self.income, "Operating Income", 0.0) * (1 - TAX_RATE)
+        debt = self._num(self.balance, "Total Debt", 0.0)
+        equity = self._num(self.balance, "Total Shareholder Equity", 0.0)
+        invested_capital = debt + equity
+        return self._safe_div(nopat, invested_capital) * 100
+
+    def ROCE(self) -> float:
+        ebit = self._num(self.income, "EBIT", 0.0)
+        assets = self._num(self.balance, "Total Assets", 0.0)
+        liabilities = self._num(self.balance, "Total Current Liabilities", 0.0)
+        capital_employed = assets - liabilities
+        return self._safe_div(ebit, capital_employed) * 100
+
+    # ================= Dividend ================= #
+
+    def dividend_yield(self) -> float:
+        dividend = self._num(self.cashflow, "Dividends Paid", 0.0)
+        price = self._get(self.income, PRICE_KEYS, default=0.0)
+        shares = self._get_shares_outstanding()
+
+        if not shares or price <= 0:
+            return 0.0
+
+        dividend_per_share = abs(dividend) / shares
+        return self._safe_div(dividend_per_share, price) * 100
+
+    def payout_ratio(self) -> float:
+        dividend = abs(self._num(self.cashflow, "Dividends Paid", 0.0))
+        ni = self._num(self.income, "Net Income", 0.0)
+        return self._safe_div(dividend, ni) * 100
+
+    def dividend_discount_model(self, growth_rate: float = 0.03) -> float:
+        dividend = abs(self._num(self.cashflow, "Dividends Paid", 0.0))
+        shares = self._get_shares_outstanding()
+
+        if not shares:
+            return 0.0
+
+        dps = dividend / shares
+        ke = self.cost_of_equity()
+
+        if ke <= growth_rate:
+            return 0.0
+
+        return (dps * (1 + growth_rate)) / (ke - growth_rate)
+
+    # ================= Buyback / Dilution ================= #
+
+    def dilution_rate(self, previous_shares: float) -> float:
+        current = self._get_shares_outstanding()
+
+        if not current or previous_shares <= 0:
+            return 0.0
+
+        return ((current - previous_shares) / previous_shares) * 100
+
+    def buyback_yield(self, previous_shares: float) -> float:
+        current = self._get_shares_outstanding()
+
+        if not current or previous_shares <= 0:
+            return 0.0
+
+        reduction = previous_shares - current
+        return self._safe_div(reduction, previous_shares) * 100
+
+    # ================= DuPont ================= #
+
+    def dupont_roe(self) -> dict:
+        margin = self.net_profit_margin() / 100
+        turnover = self.asset_turnover()
+
+        equity = self._num(self.balance, "Total Shareholder Equity", 0.0)
+        assets = self._num(self.balance, "Total Assets", 0.0)
+
+        leverage = self._safe_div(assets, equity)
+
+        roe = margin * turnover * leverage
+
+        return {
+            "net_margin": round(margin, 4),
+            "asset_turnover": round(turnover, 4),
+            "financial_leverage": round(leverage, 4),
+            "dupont_roe": round(roe * 100, 2)
+        }
+
+    # ================= Piotroski F Score ================= #
+
+    def piotroski_f_score(self) -> int:
+        score = 0
+
+        if self.ROA() > 0:
+            score += 1
+
+        if self.Free_Cash_Flow() > 0:
+            score += 1
+
+        if self.current_ratio() > 1:
+            score += 1
+
+        if self.ROE() > 10:
+            score += 1
+
+        if self.debt_to_assets() < 0.5:
+            score += 1
+
+        if self.gross_profit_margin() > 20:
+            score += 1
+
+        if self.asset_turnover() > 1:
+            score += 1
+
+        return score
+
+    # ================= Beneish M Score ================= #
+
+    def beneish_m_score(self) -> float:
+        receivables = self._num(self.balance, "Accounts Receivable", 0.0)
+        revenue = self._num(self.income, "Revenue", 0.0)
+        assets = self._num(self.balance, "Total Assets", 0.0)
+
+        dsri = self._safe_div(receivables, revenue)
+        aqi = self._safe_div(assets - receivables, assets)
+
+        return (-4.84) + (0.92 * dsri) + (0.528 * aqi)
+
+    # ================= Multi Stage DCF ================= #
+
+    def two_stage_dcf(
+        self,
+        initial_fcf: float,
+        growth1: float = 0.15,
+        growth2: float = 0.03,
+        years1: int = 5,
+        years2: int = 5,
+    ) -> float:
+
+        wacc = self.wacc()
+        fcf = initial_fcf
+        pv = 0.0
+
+        for i in range(1, years1 + 1):
+            fcf *= (1 + growth1)
+            pv += fcf / ((1 + wacc) ** i)
+
+        for j in range(years1 + 1, years1 + years2 + 1):
+            fcf *= (1 + growth2)
+            pv += fcf / ((1 + wacc) ** j)
+
+        return pv
+
+    # ================= Margin of Safety ================= #
+
+    def margin_of_safety(self, intrinsic_value: float, market_price: float) -> float:
+        return self._safe_div((intrinsic_value - market_price), intrinsic_value) * 100
+
+    # ================= Sensitivity Analysis ================= #
+
+    def sensitivity_analysis(
+        self,
+        fcf: float,
+        growth_rates: list,
+        wacc_values: list,
+    ) -> list:
+
+        results = []
+
+        for g in growth_rates:
+            for w in wacc_values:
+                if w <= g:
+                    continue
+
+                value = (fcf * (1 + g)) / (w - g)
+
+                results.append({
+                    "growth": g,
+                    "wacc": w,
+                    "value": round(value, 2)
+                })
+
+        return results
+
+    # ================= Monte Carlo DCF ================= #
+
+    def monte_carlo_dcf(
+        self,
+        fcf: float,
+        simulations: int = 1000,
+    ) -> dict:
+
+        results = []
+
+        for _ in range(simulations):
+            growth = np.random.normal(0.08, 0.03)
+            wacc = np.random.normal(0.10, 0.02)
+
+            if wacc <= growth:
+                continue
+
+            value = (fcf * (1 + growth)) / (wacc - growth)
+            results.append(value)
+
+        if not results:
+            return {}
+
+        return {
+            "mean": round(float(np.mean(results)), 2),
+            "median": round(float(np.median(results)), 2),
+            "min": round(float(np.min(results)), 2),
+            "max": round(float(np.max(results)), 2),
+        }
+
+    # ================= Historical Trend ================= #
+
+    def trend_analysis(self, values: list) -> dict:
+        if not values:
+            return {}
+
+        arr = np.array(values, dtype=float)
+
+        return {
+            "average": round(float(np.mean(arr)), 2),
+            "median": round(float(np.median(arr)), 2),
+            "std": round(float(np.std(arr)), 2),
+            "min": round(float(np.min(arr)), 2),
+            "max": round(float(np.max(arr)), 2),
+        }
+
+    # ================= Financial Validation ================= #
+
+    def validate_financials(self) -> dict:
+        errors = []
+
+        assets = self._num(self.balance, "Total Assets", 0.0)
+        liabilities = self._num(self.balance, "Total Liabilities", 0.0)
+        equity = self._num(self.balance, "Total Shareholder Equity", 0.0)
+
+        if assets <= 0:
+            errors.append("Invalid Total Assets")
+
+        if liabilities < 0:
+            errors.append("Negative Liabilities")
+
+        if equity < 0:
+            errors.append("Negative Equity")
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+        }
+
+    # ================= Economic Moat ================= #
+
+    def moat_score(self) -> dict:
+        score = 0
+
+        if self.ROIC() > 15:
+            score += 2
+
+        if self.gross_profit_margin() > 40:
+            score += 2
+
+        if self.net_profit_margin() > 15:
+            score += 2
+
+        if self.debt_to_equity() < 0.5:
+            score += 2
+
+        if self.Free_Cash_Flow() > 0:
+            score += 2
+
+        return {
+            "score": score,
+            "max_score": 10
+        }
+
+    # ================= Investment Scoring ================= #
+
+    def investment_score(self) -> dict:
+        score = 0
+
+        if self.ROE() > 15:
+            score += 20
+
+        if self.ROIC() > 12:
+            score += 20
+
+        if self.current_ratio() > 1.5:
+            score += 10
+
+        if self.debt_to_equity() < 1:
+            score += 15
+
+        if self.Free_Cash_Flow() > 0:
+            score += 15
+
+        if self.altman_z_score() > 3:
+            score += 20
+
+        return {
+            "score": score,
+            "rating": (
+                "Excellent" if score >= 80 else
+                "Good" if score >= 60 else
+                "Average" if score >= 40 else
+                "Weak"
+            )
+        }
+
+    # ================= Scenario Analysis ================= #
+
+    def scenario_analysis(self, base_fcf: float) -> dict:
+        return {
+            "bear": self.two_stage_dcf(base_fcf, 0.03, 0.01),
+            "base": self.two_stage_dcf(base_fcf, 0.08, 0.03),
+            "bull": self.two_stage_dcf(base_fcf, 0.15, 0.05),
+        }
+
+    # ================= JSON Serializer ================= #
+
+    def to_json_summary(self) -> dict:
+        return {
+            "roe": self.ROE(),
+            "roic": self.ROIC(),
+            "fcf": self.Free_Cash_Flow(),
+            "wacc": self.wacc(),
+            "altman_z": self.altman_z_score(),
+            "investment_score": self.investment_score(),
+        }
+
+```

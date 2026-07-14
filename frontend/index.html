@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pro Stock Analyzer · 200+ Ratios</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Cormorant+Garamond:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- Topbar                                                    -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">▮</div>
+      <div>
+        <div class="brand-title">Pro Stock Analyzer</div>
+        <div class="brand-sub">200+ Ratios · 18 Categories · Professional Grade</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <div class="server-status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Connecting...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- Search bar                                                -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <section class="search-section">
+    <div class="search-container">
+      <input
+        type="text"
+        id="symbolInput"
+        class="search-input"
+        placeholder="กรอก symbol เช่น AAPL, NVDA, PLTR..."
+        autocomplete="off"
+      />
+      <button id="analyzeBtn" class="btn-primary">
+        <span class="btn-label">Analyze</span>
+        <span class="btn-shortcut">Enter</span>
+      </button>
+    </div>
+    <div id="symbolChips" class="symbol-chips"></div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- Main content                                              -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <main class="main">
+
+    <!-- Loading state -->
+    <div id="loadingView" class="loading-view hidden">
+      <div class="spinner"></div>
+      <div class="loading-text">กำลังคำนวณ 200+ อัตราส่วน...</div>
+    </div>
+
+    <!-- Empty state -->
+    <div id="emptyView" class="empty-view">
+      <div class="empty-icon">📊</div>
+      <div class="empty-title">Professional Stock Analyzer</div>
+      <div class="empty-subtitle">
+        ระบบวิเคราะห์อัตราส่วนทางการเงินระดับสถาบัน<br/>
+        รองรับ 18 หมวดหมู่ · มากกว่า 200 สูตร
+      </div>
+      <div id="categoriesPreview" class="categories-preview"></div>
+    </div>
+
+    <!-- Results view -->
+    <div id="resultsView" class="results-view hidden">
+
+      <!-- Header card: Score + Signal -->
+      <section class="scorecard">
+        <div class="scorecard-left">
+          <div class="stock-symbol" id="stockSymbol">--</div>
+          <div class="stock-name" id="stockName">--</div>
+          <div class="stock-meta">
+            <span id="stockSector">--</span>
+            <span class="dot">·</span>
+            <span id="stockIndustry">--</span>
+          </div>
+          <div class="stock-price">
+            <span class="price-label">Current Price</span>
+            <span class="price-value" id="stockPrice">--</span>
+          </div>
+        </div>
+
+        <div class="scorecard-center">
+          <div class="signal-container">
+            <div class="signal-label">Signal</div>
+            <div class="signal-value" id="signalValue">--</div>
+            <div class="signal-value-th" id="signalValueTh">--</div>
+          </div>
+        </div>
+
+        <div class="scorecard-right">
+          <div class="composite-score">
+            <div class="score-circle">
+              <svg viewBox="0 0 100 100" class="score-svg">
+                <circle cx="50" cy="50" r="45" class="score-bg" />
+                <circle cx="50" cy="50" r="45" class="score-fg" id="scoreFg" />
+              </svg>
+              <div class="score-number" id="scoreNumber">--</div>
+            </div>
+            <div class="score-label">Composite Score</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Narrative + Sub-scores -->
+      <section class="narrative-section">
+        <div class="narrative-card">
+          <div class="narrative-title">
+            <span class="flag">🇹🇭</span> วิเคราะห์
+          </div>
+          <p class="narrative-text" id="narrativeTh">--</p>
+        </div>
+        <div class="narrative-card">
+          <div class="narrative-title">
+            <span class="flag">🇬🇧</span> Analysis
+          </div>
+          <p class="narrative-text" id="narrativeEn">--</p>
+        </div>
+      </section>
+
+      <section class="subscores-section">
+        <div class="subscore-item">
+          <div class="subscore-label">Profitability</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-profitability"></div>
+          </div>
+          <div class="subscore-value" id="score-profitability-val">--</div>
+        </div>
+        <div class="subscore-item">
+          <div class="subscore-label">Valuation</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-valuation"></div>
+          </div>
+          <div class="subscore-value" id="score-valuation-val">--</div>
+        </div>
+        <div class="subscore-item">
+          <div class="subscore-label">Quality</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-quality"></div>
+          </div>
+          <div class="subscore-value" id="score-quality-val">--</div>
+        </div>
+        <div class="subscore-item">
+          <div class="subscore-label">Liquidity</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-liquidity"></div>
+          </div>
+          <div class="subscore-value" id="score-liquidity-val">--</div>
+        </div>
+        <div class="subscore-item">
+          <div class="subscore-label">Leverage</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-leverage"></div>
+          </div>
+          <div class="subscore-value" id="score-leverage-val">--</div>
+        </div>
+        <div class="subscore-item">
+          <div class="subscore-label">Growth</div>
+          <div class="subscore-bar-wrap">
+            <div class="subscore-bar" id="score-growth"></div>
+          </div>
+          <div class="subscore-value" id="score-growth-val">--</div>
+        </div>
+      </section>
+
+      <!-- Category tabs + content -->
+      <section class="tabs-section">
+        <div class="tabs" id="categoryTabs"></div>
+        <div class="tab-content" id="tabContent">
+          <div class="ratio-grid" id="ratioGrid"></div>
+        </div>
+      </section>
+
+      <!-- Chart: trends over years -->
+      <section class="chart-section">
+        <div class="chart-header">
+          <div class="chart-title">Ratio Trends Over Years</div>
+          <select id="chartRatioSelector" class="chart-selector"></select>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="trendChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Summary stats -->
+      <section class="summary-section">
+        <div class="summary-stat">
+          <div class="summary-value" id="totalRatios">--</div>
+          <div class="summary-label">Total Ratios Computed</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-value" id="totalCategories">18</div>
+          <div class="summary-label">Categories</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-value" id="totalYears">--</div>
+          <div class="summary-label">Years Analyzed</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-value" id="latestYear">--</div>
+          <div class="summary-label">Latest Fiscal Year</div>
+        </div>
+      </section>
+
+      <!-- ═════════════ Deep Analysis Section ═════════════ -->
+      <section class="deep-section" id="deepSection">
+        <div class="deep-header">
+          <div class="deep-title-row">
+            <div>
+              <div class="deep-title">Deep Analysis Report</div>
+              <div class="deep-subtitle">รายงานการวิเคราะห์เชิงลึก · 12 sections · ใช้อัตราส่วน 80+ ตัว</div>
+            </div>
+            <div class="deep-toggle-lang">
+              <button class="lang-btn active" data-lang="th" id="langTh">🇹🇭 ไทย</button>
+              <button class="lang-btn" data-lang="en" id="langEn">🇬🇧 English</button>
+            </div>
+          </div>
+          <div class="deep-actions">
+            <button class="deep-action-btn" id="loadDeepBtn">
+              <span>⚡</span> โหลด Deep Analysis
+            </button>
+            <button class="deep-action-btn hidden" id="copyDeepBtn">
+              <span>📋</span> Copy Markdown
+            </button>
+            <button class="deep-action-btn hidden" id="downloadDeepBtn">
+              <span>💾</span> Download .md
+            </button>
+          </div>
+        </div>
+
+        <div class="deep-loading hidden" id="deepLoading">
+          <div class="spinner"></div>
+          <div class="loading-text">กำลังสร้างรายงานเชิงลึก...</div>
+        </div>
+
+        <div class="deep-content hidden" id="deepContent">
+          <div class="deep-stats" id="deepStats"></div>
+          <div class="deep-sections" id="deepSections"></div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- Error view -->
+    <div id="errorView" class="error-view hidden">
+      <div class="error-icon">⚠️</div>
+      <div class="error-title">Error</div>
+      <div class="error-message" id="errorMessage">--</div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-content">
+      <div>Pro Stock Analyzer v1.0 · Powered by financetoolkit + custom engine</div>
+      <div class="disclaimer">
+        For research and educational purposes only. Not investment advice.<br/>
+        เพื่อการศึกษาและวิจัย ไม่ใช่คำแนะนำการลงทุน
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
