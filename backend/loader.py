@@ -63,3 +63,55 @@ def validate_data(data: dict) -> tuple[bool, list[str]]:
             warnings.append("No overlapping years across statements")
 
     return len([w for w in warnings if not w.startswith("Missing Basic Info")]) == 0, warnings
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Smart fetch — load from cache, or fetch from API if missing/stale
+# ═══════════════════════════════════════════════════════════════════════════
+
+def load_or_fetch(
+    symbol: str,
+    data_dir: Optional[Path] = None,
+    max_age_days: int = 30,
+    auto_cleanup: bool = True,
+) -> dict:
+    """
+    โหลดข้อมูลหุ้นแบบฉลาด:
+      1. ลบไฟล์เก่าเกิน max_age_days ใน data/ อัตโนมัติ (auto_cleanup)
+      2. ถ้ามีไฟล์ใน data/ และยังสด → ใช้ cache เลย (ไม่ยิง API)
+      3. ถ้าไม่มี/หมดอายุ → ดึงจาก API (FMP → yfinance) + บันทึกลง data/
+      4. ถ้า fetch ล้มเหลวแต่มีไฟล์เก่าอยู่ → ใช้ไฟล์เก่าไปก่อน (พร้อม warning)
+
+    Raises:
+        FileNotFoundError: ไม่มี cache และ fetch ไม่สำเร็จ
+    """
+    import logging
+    from backend.cache_manager import cleanup_old_files, is_fresh
+    from backend.fetcher import fetch_and_save, FetchError
+
+    log = logging.getLogger("pro_stock_analyzer.loader")
+    symbol = symbol.upper().strip()
+    d = data_dir or DATA_DIR
+    path = d / f"{symbol}_financials.json"
+
+    # 1) Auto cleanup — ลบไฟล์เกินอายุ (เฉพาะใน data/)
+    if auto_cleanup:
+        cleanup_old_files(data_dir=d, max_age_days=max_age_days)
+
+    # 2) Cache hit — มีไฟล์และยังสด
+    if path.exists() and is_fresh(path, max_age_days):
+        log.info(f"📂 Cache hit: {symbol} (using local file)")
+        return load_financials(symbol, data_dir=d)
+
+    # 3) Cache miss — ดึงจาก API
+    log.info(f"🌐 Cache miss: {symbol} — fetching from API...")
+    try:
+        return fetch_and_save(symbol, data_dir=d)
+    except FetchError as e:
+        # 4) Fallback — fetch พังแต่ยังมีไฟล์เก่า (กรณี cleanup ปิดอยู่)
+        if path.exists():
+            log.warning(f"⚠ Fetch failed for {symbol}, using stale cache: {e}")
+            return load_financials(symbol, data_dir=d)
+        raise FileNotFoundError(
+            f"No cached data for {symbol} and API fetch failed: {e}"
+        )

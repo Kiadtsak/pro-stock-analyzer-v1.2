@@ -19,6 +19,8 @@ from backend import (
     validate_data,
 )
 from backend.config import FRONTEND_DIR, HOST, PORT
+from backend.loader import load_or_fetch
+from backend.cache_manager import cleanup_old_files, cache_status
 from backend.narrator import deep_analyze
 
 app = FastAPI(
@@ -39,6 +41,31 @@ app.add_middleware(
 # ═══════════════════════════════════════════════════════════════════════════
 # API endpoints
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Cache lifecycle — startup cleanup + management endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.on_event("startup")
+async def _startup_cache_cleanup():
+    """ลบไฟล์ cache ที่เกิน 30 วัน ทุกครั้งที่ server start."""
+    report = cleanup_old_files()
+    if report["deleted"]:
+        print(f"🗑  Startup cleanup: deleted {len(report['deleted'])} stale files")
+
+
+@app.get("/api/cache/status")
+async def get_cache_status():
+    """ดูสถานะ cache — ไฟล์ไหนสด ไฟล์ไหนใกล้หมดอายุ."""
+    return cache_status()
+
+
+@app.post("/api/cache/cleanup")
+async def run_cache_cleanup(dry_run: bool = False):
+    """สั่งลบไฟล์เก่าเกิน 30 วันทันที (dry_run=true เพื่อดูก่อนไม่ลบจริง)."""
+    return cleanup_old_files(dry_run=dry_run)
+
 
 @app.get("/api/health")
 async def health():
@@ -77,7 +104,7 @@ async def analyze(
 ):
     """Full analysis for a symbol."""
     try:
-        data = load_financials(symbol)
+        data = load_or_fetch(symbol)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -105,7 +132,7 @@ async def analyze_single_category(symbol: str, category: str):
         raise HTTPException(400, f"Unknown category: {category}")
 
     try:
-        data = load_financials(symbol)
+        data = load_or_fetch(symbol)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -130,7 +157,7 @@ async def analyze_deep(symbol: str):
     Returns structured sections + rendered markdown (TH + EN).
     """
     try:
-        data = load_financials(symbol)
+        data = load_or_fetch(symbol)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -146,7 +173,7 @@ async def analyze_deep(symbol: str):
 async def analyze_summary(symbol: str):
     """Just the scorecard + signal + narrative (fast)."""
     try:
-        data = load_financials(symbol)
+        data = load_or_fetch(symbol)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
