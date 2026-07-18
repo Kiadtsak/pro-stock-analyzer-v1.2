@@ -8,5 +8,5 @@ __pycache__/
 .env
 .env/example
 data/*_financials.json
-!data/NVDA_financials.json
+
 
